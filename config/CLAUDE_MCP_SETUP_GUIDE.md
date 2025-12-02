@@ -35,69 +35,75 @@ mkdir -p ~/Library/Application\ Support/Claude
 ```
 
 2. 다음 내용으로 `claude_desktop_config.json` 파일을 생성합니다:
+
+**중요:**
+- `${PROJECT_PATH}`를 실제 프로젝트가 설치된 경로로 변경하세요
+- `cwd` (current working directory) 설정이 **반드시 필요**합니다
+- `PYTHONPATH`에 프로젝트 루트 경로를 포함해야 합니다
+
+**예시 (실제 경로로 변경하세요):**
+
 ```json
 {
   "mcpServers": {
     "davinci-resolve": {
       "name": "DaVinci Resolve MCP",
-      "command": "/home/user/res/venv/bin/python",
-      "args": ["/home/user/res/resolve_mcp_server.py"],
+      "command": "/Users/feeldiz_01/davinci-resolve-mcp/venv/bin/python",
+      "args": ["/Users/feeldiz_01/davinci-resolve-mcp/resolve_mcp_server.py"],
+      "cwd": "/Users/feeldiz_01/davinci-resolve-mcp",
       "env": {
         "RESOLVE_SCRIPT_API": "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
         "RESOLVE_SCRIPT_LIB": "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
-        "PYTHONPATH": "$PYTHONPATH:/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules/"
+        "PYTHONPATH": "/Users/feeldiz_01/davinci-resolve-mcp:/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules/"
       }
     }
   }
 }
 ```
 
-**중요:** `/home/user/res` 경로를 실제 프로젝트가 설치된 경로로 변경하세요!
-
-예시:
-```json
-{
-  "mcpServers": {
-    "davinci-resolve": {
-      "name": "DaVinci Resolve MCP",
-      "command": "/Users/yourname/davinci-resolve-mcp/venv/bin/python",
-      "args": ["/Users/yourname/davinci-resolve-mcp/resolve_mcp_server.py"],
-      "env": {
-        "RESOLVE_SCRIPT_API": "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
-        "RESOLVE_SCRIPT_LIB": "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
-        "PYTHONPATH": "$PYTHONPATH:/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules/"
-      }
-    }
-  }
-}
-```
+**설정 항목 설명:**
+- `command`: 가상환경의 Python 실행 파일 경로
+- `args`: MCP 서버 스크립트 경로
+- `cwd`: 프로젝트 루트 디렉토리 (이것이 없으면 `ModuleNotFoundError` 발생!)
+- `PYTHONPATH`: 프로젝트 루트와 DaVinci Resolve 모듈 경로를 콜론(:)으로 구분
 
 #### Windows 사용자
 
 1. `%APPDATA%\Claude` 디렉토리를 생성합니다 (없는 경우)
 
 2. 다음 내용으로 `claude_desktop_config.json` 파일을 생성합니다:
+
+**중요:**
+- Windows에서도 경로는 슬래시(/)를 사용하세요 (역슬래시 아님!)
+- `cwd` (current working directory) 설정이 **반드시 필요**합니다
+- `PYTHONPATH`에 프로젝트 루트 경로를 포함해야 합니다
+- 실제 프로젝트가 설치된 경로로 변경하세요
+
+**예시:**
+
 ```json
 {
   "mcpServers": {
     "davinci-resolve": {
       "name": "DaVinci Resolve MCP",
-      "command": "C:/path/to/your/davinci-resolve-mcp/venv/Scripts/python.exe",
-      "args": ["C:/path/to/your/davinci-resolve-mcp/resolve_mcp_server.py"],
+      "command": "C:/Users/YourName/davinci-resolve-mcp/venv/Scripts/python.exe",
+      "args": ["C:/Users/YourName/davinci-resolve-mcp/resolve_mcp_server.py"],
+      "cwd": "C:/Users/YourName/davinci-resolve-mcp",
       "env": {
         "RESOLVE_SCRIPT_API": "C:/ProgramData/Blackmagic Design/DaVinci Resolve/Support/Developer/Scripting",
         "RESOLVE_SCRIPT_LIB": "C:/Program Files/Blackmagic Design/DaVinci Resolve/fusionscript.dll",
-        "PYTHONPATH": "C:/ProgramData/Blackmagic Design/DaVinci Resolve/Support/Developer/Scripting/Modules"
+        "PYTHONPATH": "C:/Users/YourName/davinci-resolve-mcp;C:/ProgramData/Blackmagic Design/DaVinci Resolve/Support/Developer/Scripting/Modules"
       }
     }
   }
 }
 ```
 
-**중요:**
-- Windows 경로는 슬래시(/)를 사용하세요
-- 실제 프로젝트가 설치된 경로로 변경하세요
-- DaVinci Resolve 설치 경로가 다른 경우 해당 경로도 수정하세요
+**설정 항목 설명:**
+- `command`: 가상환경의 Python 실행 파일 경로 (`python.exe`)
+- `args`: MCP 서버 스크립트 경로
+- `cwd`: 프로젝트 루트 디렉토리 (이것이 없으면 `ModuleNotFoundError` 발생!)
+- `PYTHONPATH`: Windows에서는 세미콜론(;)으로 경로 구분
 
 ### 3. DaVinci Resolve 실행
 
@@ -118,6 +124,39 @@ Claude Desktop에서 다음과 같이 테스트해보세요:
 
 ## 문제 해결
 
+### 일반적인 오류와 해결 방법
+
+#### 1. `ModuleNotFoundError: No module named 'src'`
+
+**원인:** `cwd` (현재 작업 디렉토리) 설정이 누락되었거나 PYTHONPATH가 잘못 설정됨
+
+**해결:**
+- Claude Desktop 설정 파일에 `"cwd": "/Users/yourname/davinci-resolve-mcp"` 추가
+- `PYTHONPATH`에 프로젝트 루트 경로 포함
+- macOS: 경로 구분자로 콜론(`:`) 사용
+- Windows: 경로 구분자로 세미콜론(`;`) 사용
+
+#### 2. `spawn python ENOENT`
+
+**원인:** Python 실행 파일을 찾을 수 없음
+
+**해결:**
+- `command` 경로가 정확한지 확인
+- 가상환경이 제대로 생성되었는지 확인:
+  ```bash
+  # macOS
+  ls -la /Users/yourname/davinci-resolve-mcp/venv/bin/python
+
+  # Windows
+  dir C:\Users\YourName\davinci-resolve-mcp\venv\Scripts\python.exe
+  ```
+
+#### 3. `Server transport closed unexpectedly`
+
+**원인:** 서버가 조기에 종료됨 (보통 위의 오류들 때문)
+
+**해결:** Claude Desktop 로그를 확인하여 실제 오류 메시지 파악
+
 ### 연결 실패
 
 1. **DaVinci Resolve 실행 확인**: Resolve가 실행 중인지 확인
@@ -125,11 +164,39 @@ Claude Desktop에서 다음과 같이 테스트해보세요:
 3. **환경 변수 확인**: DaVinci Resolve 설치 경로가 설정과 일치하는지 확인
 4. **Python 가상환경 확인**: venv가 올바르게 생성되었는지 확인
 
-### 로그 확인
+### Claude Desktop 로그 확인
 
-문제가 발생한 경우 다음 위치에서 로그를 확인할 수 있습니다:
+macOS에서 Claude Desktop 로그 확인:
+```bash
+# Claude Desktop 개발자 도구 열기 (보통 Cmd+Shift+I)
+# 또는 터미널에서:
+tail -f ~/Library/Logs/Claude/mcp*.log
 ```
-/home/user/res/logs/
+
+Windows에서 로그 확인:
+```
+%LOCALAPPDATA%\Claude\logs\
+```
+
+### 올바른 설정 예시 확인
+
+**macOS (사용자의 실제 경로 기준):**
+```json
+{
+  "mcpServers": {
+    "davinci-resolve": {
+      "name": "DaVinci Resolve MCP",
+      "command": "/Users/feeldiz_01/davinci-resolve-mcp/venv/bin/python",
+      "args": ["/Users/feeldiz_01/davinci-resolve-mcp/resolve_mcp_server.py"],
+      "cwd": "/Users/feeldiz_01/davinci-resolve-mcp",
+      "env": {
+        "RESOLVE_SCRIPT_API": "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
+        "RESOLVE_SCRIPT_LIB": "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
+        "PYTHONPATH": "/Users/feeldiz_01/davinci-resolve-mcp:/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules/"
+      }
+    }
+  }
+}
 ```
 
 ### 추가 도움말
