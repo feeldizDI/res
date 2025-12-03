@@ -3,12 +3,15 @@
 DaVinci Resolve MCP Server
 A server that connects to DaVinci Resolve via the Model Context Protocol (MCP)
 
-Version: 1.3.8 - Improved Cursor Integration, Entry Point Standardization
+Version: 1.4.0 - Added Suuktest Folder Management and XML Import Tools
 """
 
 import os
 import sys
 import logging
+import glob
+from pathlib import Path
+from collections import defaultdict
 from typing import List, Dict, Any, Optional, Union
 
 # Add src directory to Python path
@@ -93,7 +96,7 @@ logging.basicConfig(
 logger = logging.getLogger("davinci-resolve-mcp")
 
 # Log server version and platform
-VERSION = "1.3.8"
+VERSION = "1.4.0"
 logger.info(f"Starting DaVinci Resolve MCP Server v{VERSION}")
 logger.info(f"Detected platform: {get_platform()}")
 logger.info(f"Using Resolve API path: {RESOLVE_API_PATH}")
@@ -123,6 +126,19 @@ except ImportError as e:
 except Exception as e:
     logger.error(f"Unexpected error initializing Resolve: {str(e)}")
     resolve = None
+
+# ------------------
+# Suuktest Configuration
+# ------------------
+SUUKTEST_ROOT = "/Users/Shared/suuktest"
+
+# Supported file formats
+MEDIA_EXTENSIONS = {
+    'video': ['.mov', '.mp4', '.mxf', '.r3d', '.braw', '.avi', '.mkv', '.dng', '.dpx', '.exr'],
+    'audio': ['.wav', '.aif', '.aiff', '.mp3', '.aac', '.m4a', '.flac'],
+    'image': ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.psd', '.exr'],
+    'timeline': ['.xml', '.fcpxml', '.aaf', '.edl'],
+}
 
 # ------------------
 # MCP Tools/Resources
@@ -4624,6 +4640,840 @@ def get_project_info_endpoint() -> Dict[str, Any]:
         return {"error": "No project currently open"}
     
     return get_project_info(current_project)
+
+# ------------------
+# Helper Functions for Suuktest and Media Pool Management
+# ------------------
+
+def _get_file_type(ext: str) -> str:
+    """Determine file type from extension."""
+    ext = ext.lower()
+    for category, extensions in MEDIA_EXTENSIONS.items():
+        if ext in extensions:
+            return category
+    return 'other'
+
+
+def _get_or_create_bin(media_pool, parent_folder, bin_name: str):
+    """Find or create a bin in the media pool."""
+    # Check existing bins
+    subfolders = parent_folder.GetSubFolderList()
+    if subfolders:
+        for subfolder in subfolders:
+            if subfolder.GetName() == bin_name:
+                return subfolder
+
+    # Create new bin
+    new_bin = media_pool.AddSubFolder(parent_folder, bin_name)
+    return new_bin
+
+
+def _get_all_clips_recursive(folder) -> List:
+    """Recursively collect all clips from a folder and its subfolders."""
+    all_clips = []
+
+    clips = folder.GetClipList()
+    if clips:
+        all_clips.extend(clips)
+
+    subfolders = folder.GetSubFolderList()
+    if subfolders:
+        for subfolder in subfolders:
+            all_clips.extend(_get_all_clips_recursive(subfolder))
+
+    return all_clips
+
+
+# ------------------
+# Suuktest Folder Management Tools
+# ------------------
+
+@mcp.tool()
+def suuktest_scan_structure(show_details: bool = False) -> dict:
+    """
+    Scan the Suuktest folder structure (/Users/Shared/suuktest).
+
+    Args:
+        show_details: Show detailed information about files
+
+    Returns:
+        Dictionary containing folder structure, file counts, and sizes
+    """
+    root_path = Path(SUUKTEST_ROOT)
+
+    if not root_path.exists():
+        return {"error": f"Suuktest folder not found: {SUUKTEST_ROOT}"}
+
+    structure = {}
+    total_size = 0
+
+    # Level 1 folders (e.g., mac3)
+    for level1 in sorted(root_path.iterdir()):
+        if not level1.is_dir() or level1.name.startswith('.'):
+            continue
+
+        structure[level1.name] = {}
+
+        # Level 2 folders (e.g., CJU_SE)
+        for level2 in sorted(level1.iterdir()):
+            if not level2.is_dir() or level2.name.startswith('.'):
+                continue
+
+            # Count files by type
+            file_counts = defaultdict(int)
+            folder_size = 0
+
+            for file in level2.rglob("*"):
+                if file.is_file():
+                    ext = file.suffix.lower()
+                    file_type = _get_file_type(ext)
+                    file_counts[file_type] += 1
+                    folder_size += file.stat().st_size
+
+            total_size += folder_size
+
+            structure[level1.name][level2.name] = {
+                "files": dict(file_counts),
+                "size_gb": folder_size / (1024**3)
+            }
+
+    return {
+        "root": SUUKTEST_ROOT,
+        "structure": structure,
+        "total_size_gb": total_size / (1024**3)
+    }
+
+
+@mcp.tool()
+def suuktest_import_folder(
+    subfolder_path: str,
+    organize_by_extension: bool = True,
+    import_timelines: bool = True
+) -> dict:
+    """
+    Import a specific subfolder from Suuktest into the media pool.
+
+    Args:
+        subfolder_path: Subfolder path relative to Suuktest root (e.g., "mac3/CJU_SE")
+        organize_by_extension: Organize files into bins by extension type
+        import_timelines: Import XML files as timelines
+
+    Returns:
+        Dictionary with import results including counts and bin name
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+    media_storage = resolve.GetMediaStorage()
+    root_folder = media_pool.GetRootFolder()
+
+    # Verify path
+    source_path = Path(SUUKTEST_ROOT) / subfolder_path
+
+    if not source_path.exists():
+        return {"error": f"Folder not found: {source_path}"}
+
+    # Create project bin
+    project_bin_name = Path(subfolder_path).name
+    project_bin = _get_or_create_bin(media_pool, root_folder, project_bin_name)
+
+    # Find media files
+    media_files = defaultdict(list)
+
+    for category, extensions in MEDIA_EXTENSIONS.items():
+        for ext in extensions:
+            files = list(source_path.glob(f"**/*{ext}"))
+            media_files[category].extend([str(f) for f in files])
+
+    # Import results
+    imported_counts = defaultdict(int)
+
+    # Import timelines
+    if import_timelines and media_files['timeline']:
+        for xml_file in media_files['timeline']:
+            try:
+                timeline = media_pool.ImportTimelineFromFile(xml_file)
+                if timeline:
+                    imported_counts['timelines'] += 1
+            except:
+                pass
+
+    # Import media files
+    for category in ['video', 'audio', 'image']:
+        if not media_files[category]:
+            continue
+
+        if organize_by_extension:
+            # Create category bin
+            category_bin = _get_or_create_bin(
+                media_pool,
+                project_bin,
+                category.capitalize()
+            )
+            media_pool.SetCurrentFolder(category_bin)
+        else:
+            media_pool.SetCurrentFolder(project_bin)
+
+        # Import
+        clips = media_storage.AddItemListToMediaPool(media_files[category])
+
+        if clips:
+            count = len(clips) if isinstance(clips, list) else 1
+            imported_counts[category] = count
+
+    return {
+        "success": True,
+        "imported": dict(imported_counts),
+        "bin_name": project_bin_name,
+        "source_path": str(source_path)
+    }
+
+
+@mcp.tool()
+def suuktest_import_all_xmls(subfolder_path: str) -> dict:
+    """
+    Import all XML/AAF/EDL files from a Suuktest subfolder as timelines.
+
+    Args:
+        subfolder_path: Subfolder path relative to Suuktest root (e.g., "mac3/CJU_SE")
+
+    Returns:
+        Dictionary with imported timeline names and any failures
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+
+    # Verify path
+    source_path = Path(SUUKTEST_ROOT) / subfolder_path
+
+    if not source_path.exists():
+        return {"error": f"Folder not found: {source_path}"}
+
+    # Find XML files
+    xml_files = []
+    for ext in MEDIA_EXTENSIONS['timeline']:
+        xml_files.extend(source_path.glob(f"**/*{ext}"))
+
+    if not xml_files:
+        return {
+            "success": True,
+            "imported_timelines": [],
+            "message": "No XML files found"
+        }
+
+    # Import each XML
+    imported_timelines = []
+    failed = []
+
+    for xml_file in xml_files:
+        try:
+            timeline = media_pool.ImportTimelineFromFile(str(xml_file))
+            if timeline:
+                imported_timelines.append(timeline.GetName())
+            else:
+                failed.append(xml_file.name)
+        except Exception as e:
+            failed.append(f"{xml_file.name}: {str(e)}")
+
+    return {
+        "success": True,
+        "imported_timelines": imported_timelines,
+        "failed": failed if failed else None,
+        "total_found": len(xml_files)
+    }
+
+
+@mcp.tool()
+def suuktest_find_media_files(
+    subfolder_path: Optional[str] = None,
+    file_type: Optional[str] = None
+) -> dict:
+    """
+    Search for media files in the Suuktest folder.
+
+    Args:
+        subfolder_path: Specific subfolder to search (None = search entire Suuktest)
+        file_type: File type filter (video, audio, image, timeline)
+
+    Returns:
+        Dictionary with search results grouped by file type
+    """
+    root_path = Path(SUUKTEST_ROOT)
+    search_path = root_path / subfolder_path if subfolder_path else root_path
+
+    if not search_path.exists():
+        return {"error": f"Folder not found: {search_path}"}
+
+    # File type filter
+    if file_type:
+        if file_type not in MEDIA_EXTENSIONS:
+            return {"error": f"Invalid file type: {file_type}"}
+        categories = {file_type: MEDIA_EXTENSIONS[file_type]}
+    else:
+        categories = MEDIA_EXTENSIONS
+
+    # Search files
+    results = defaultdict(list)
+
+    for category, extensions in categories.items():
+        for ext in extensions:
+            files = search_path.glob(f"**/*{ext}")
+
+            for file in files:
+                results[category].append({
+                    "name": file.name,
+                    "path": str(file),
+                    "size_mb": file.stat().st_size / (1024 * 1024),
+                    "parent": file.parent.name
+                })
+
+    return {
+        "search_path": str(search_path),
+        "results": dict(results),
+        "total_files": sum(len(files) for files in results.values())
+    }
+
+
+@mcp.tool()
+def suuktest_relink_clips(subfolder_path: Optional[str] = None) -> dict:
+    """
+    Automatically relink offline clips using media from Suuktest folder.
+
+    Args:
+        subfolder_path: Specific subfolder to search for media (None = search entire Suuktest)
+
+    Returns:
+        Dictionary with relink statistics
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+    root_folder = media_pool.GetRootFolder()
+
+    # Determine relink path
+    if subfolder_path:
+        relink_path = str(Path(SUUKTEST_ROOT) / subfolder_path)
+        if not os.path.exists(relink_path):
+            return {"error": f"Folder not found: {relink_path}"}
+    else:
+        relink_path = SUUKTEST_ROOT
+
+    # Collect all clips
+    all_clips = _get_all_clips_recursive(root_folder)
+
+    # Find offline clips
+    offline_clips = []
+
+    for clip in all_clips:
+        file_path = clip.GetClipProperty("File Path")
+        if not file_path or not os.path.exists(file_path):
+            offline_clips.append(clip)
+
+    if not offline_clips:
+        return {
+            "success": True,
+            "total_clips": len(all_clips),
+            "offline_clips": 0,
+            "message": "All clips are online"
+        }
+
+    # Attempt relink
+    result = media_pool.RelinkClips(offline_clips, relink_path)
+
+    # Check results
+    still_offline = 0
+    for clip in offline_clips:
+        file_path = clip.GetClipProperty("File Path")
+        if not file_path or not os.path.exists(file_path):
+            still_offline += 1
+
+    relinked = len(offline_clips) - still_offline
+
+    return {
+        "success": True,
+        "total_clips": len(all_clips),
+        "offline_clips": len(offline_clips),
+        "relinked": relinked,
+        "still_offline": still_offline,
+        "relink_path": relink_path
+    }
+
+
+@mcp.tool()
+def suuktest_list_projects() -> dict:
+    """
+    List all projects in the Suuktest folder structure.
+
+    Returns:
+        Dictionary with project paths, file counts, and sizes
+    """
+    root_path = Path(SUUKTEST_ROOT)
+
+    if not root_path.exists():
+        return {"error": f"Suuktest folder not found: {SUUKTEST_ROOT}"}
+
+    projects = []
+
+    # Level 1 folders
+    for level1 in sorted(root_path.iterdir()):
+        if not level1.is_dir() or level1.name.startswith('.'):
+            continue
+
+        # Level 2 folders
+        for level2 in sorted(level1.iterdir()):
+            if not level2.is_dir() or level2.name.startswith('.'):
+                continue
+
+            # Analyze files
+            file_counts = defaultdict(int)
+            total_size = 0
+
+            for file in level2.rglob("*"):
+                if file.is_file():
+                    ext = file.suffix.lower()
+                    file_type = _get_file_type(ext)
+                    file_counts[file_type] += 1
+                    total_size += file.stat().st_size
+
+            project_path = f"{level1.name}/{level2.name}"
+
+            projects.append({
+                "path": project_path,
+                "files": dict(file_counts),
+                "size_gb": total_size / (1024**3),
+                "has_timelines": file_counts['timeline'] > 0
+            })
+
+    return {
+        "root": SUUKTEST_ROOT,
+        "projects": projects,
+        "total_projects": len(projects)
+    }
+
+
+# ------------------
+# XML Timeline Import and Media Pool Management Tools
+# ------------------
+
+@mcp.tool()
+def import_timeline_from_file(
+    file_path: str,
+    timeline_name: Optional[str] = None
+) -> dict:
+    """
+    Import an XML/AAF/EDL file as a timeline.
+
+    Args:
+        file_path: Path to XML/AAF/EDL file
+        timeline_name: Optional name for the timeline (uses filename if not specified)
+
+    Returns:
+        Dictionary with timeline information
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+
+    # Check supported formats
+    ext = os.path.splitext(file_path)[1].lower()
+    supported_formats = ['.xml', '.fcpxml', '.aaf', '.edl']
+
+    if ext not in supported_formats:
+        return {
+            "error": f"Unsupported format: {ext}",
+            "supported_formats": supported_formats
+        }
+
+    try:
+        # Import timeline
+        timeline = media_pool.ImportTimelineFromFile(file_path)
+
+        if not timeline:
+            return {"error": "Failed to import timeline"}
+
+        # Rename timeline if requested
+        if timeline_name:
+            timeline.SetName(timeline_name)
+
+        # Get timeline info
+        current_name = timeline.GetName()
+        fps = timeline.GetSetting("timelineFrameRate")
+        width = timeline.GetSetting("timelineResolutionWidth")
+        height = timeline.GetSetting("timelineResolutionHeight")
+
+        return {
+            "success": True,
+            "timeline_name": current_name,
+            "fps": fps,
+            "resolution": f"{width}x{height}",
+            "file_path": file_path
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def import_all_xml_from_folder(
+    folder_path: str,
+    create_xml_bin: bool = True,
+    recursive: bool = False
+) -> dict:
+    """
+    Import all XML/AAF/EDL files from a folder as timelines.
+
+    Args:
+        folder_path: Path to folder containing XML files
+        create_xml_bin: Create an "Xml" bin in the media pool
+        recursive: Search subfolders recursively
+
+    Returns:
+        Dictionary with import statistics
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+    root_folder = media_pool.GetRootFolder()
+
+    if not os.path.exists(folder_path):
+        return {"error": f"Folder not found: {folder_path}"}
+
+    # Find XML files
+    xml_patterns = ['*.xml', '*.fcpxml', '*.aaf', '*.edl']
+    xml_files = []
+
+    for pattern in xml_patterns:
+        if recursive:
+            xml_files.extend(glob.glob(os.path.join(folder_path, '**', pattern), recursive=True))
+        else:
+            xml_files.extend(glob.glob(os.path.join(folder_path, pattern)))
+
+    if not xml_files:
+        return {
+            "success": True,
+            "imported_count": 0,
+            "total_files": 0,
+            "message": "No XML files found"
+        }
+
+    # Create Xml bin if requested
+    if create_xml_bin:
+        xml_bin = None
+        subfolders = root_folder.GetSubFolderList()
+        if subfolders:
+            for subfolder in subfolders:
+                if subfolder.GetName() == "Xml":
+                    xml_bin = subfolder
+                    break
+
+        if not xml_bin:
+            xml_bin = media_pool.AddSubFolder(root_folder, "Xml")
+
+    # Import each XML file
+    imported_timelines = []
+    failed_files = []
+
+    for xml_file in xml_files:
+        try:
+            timeline = media_pool.ImportTimelineFromFile(xml_file)
+            if timeline:
+                imported_timelines.append(timeline.GetName())
+            else:
+                failed_files.append(os.path.basename(xml_file))
+        except Exception as e:
+            failed_files.append(f"{os.path.basename(xml_file)}: {str(e)}")
+
+    return {
+        "success": True,
+        "imported_count": len(imported_timelines),
+        "total_files": len(xml_files),
+        "timelines": imported_timelines,
+        "failed_files": failed_files if failed_files else None
+    }
+
+
+@mcp.tool()
+def get_clips_in_bin(bin_name: Optional[str] = None) -> dict:
+    """
+    Get information about all clips in a specific bin.
+
+    Args:
+        bin_name: Name of the bin (uses current folder if not specified)
+
+    Returns:
+        Dictionary with bin name, clip count, and clip details
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+
+    # Find bin
+    if bin_name:
+        root_folder = media_pool.GetRootFolder()
+        target_folder = None
+
+        subfolders = root_folder.GetSubFolderList()
+        if subfolders:
+            for subfolder in subfolders:
+                if subfolder.GetName() == bin_name:
+                    target_folder = subfolder
+                    break
+
+        if not target_folder:
+            return {"error": f"Bin '{bin_name}' not found"}
+
+        clips = target_folder.GetClipList()
+    else:
+        current_folder = media_pool.GetCurrentFolder()
+        clips = current_folder.GetClipList()
+        bin_name = current_folder.GetName()
+
+    if not clips:
+        return {
+            "bin": bin_name,
+            "count": 0,
+            "clips": []
+        }
+
+    # Collect clip information
+    clip_list = []
+    for clip in clips:
+        clip_info = {
+            "name": clip.GetClipProperty("File Name") or clip.GetName(),
+            "file_path": clip.GetClipProperty("File Path"),
+            "duration": clip.GetClipProperty("Duration"),
+            "fps": clip.GetClipProperty("FPS"),
+            "resolution": clip.GetClipProperty("Resolution"),
+            "codec": clip.GetClipProperty("Video Codec Name"),
+            "type": clip.GetClipProperty("Type"),
+        }
+        clip_list.append(clip_info)
+
+    return {
+        "bin": bin_name,
+        "count": len(clip_list),
+        "clips": clip_list
+    }
+
+
+@mcp.tool()
+def get_media_pool_structure() -> dict:
+    """
+    Get the complete structure of the media pool as a tree.
+
+    Returns:
+        Dictionary representing the media pool structure with bins and clip counts
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+    root_folder = media_pool.GetRootFolder()
+
+    def get_folder_structure(folder):
+        clips = folder.GetClipList()
+        subfolders = folder.GetSubFolderList()
+
+        structure = {
+            "name": folder.GetName(),
+            "clips": len(clips) if clips else 0,
+            "subfolders": {}
+        }
+
+        if subfolders:
+            for subfolder in subfolders:
+                subfolder_name = subfolder.GetName()
+                structure["subfolders"][subfolder_name] = get_folder_structure(subfolder)
+
+        return structure
+
+    return get_folder_structure(root_folder)
+
+
+@mcp.tool()
+def create_timeline_from_bin_clips(
+    bin_name: str,
+    timeline_name: Optional[str] = None
+) -> dict:
+    """
+    Create a timeline from all clips in a bin.
+
+    Args:
+        bin_name: Source bin name
+        timeline_name: Name for the new timeline (auto-generated if not specified)
+
+    Returns:
+        Dictionary with timeline creation results
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+    root_folder = media_pool.GetRootFolder()
+
+    # Find bin
+    source_bin = None
+    subfolders = root_folder.GetSubFolderList()
+    if subfolders:
+        for subfolder in subfolders:
+            if subfolder.GetName() == bin_name:
+                source_bin = subfolder
+                break
+
+    if not source_bin:
+        return {"error": f"Bin '{bin_name}' not found"}
+
+    # Get clips
+    clips = source_bin.GetClipList()
+
+    if not clips:
+        return {"error": f"No clips in bin '{bin_name}'"}
+
+    # Determine timeline name
+    if not timeline_name:
+        timeline_name = f"{bin_name}_Timeline"
+
+    # Create timeline
+    timeline = media_pool.CreateTimelineFromClips(timeline_name, clips)
+
+    if timeline:
+        return {
+            "success": True,
+            "timeline_name": timeline.GetName(),
+            "clip_count": len(clips)
+        }
+    else:
+        return {"error": "Failed to create timeline"}
+
+
+@mcp.tool()
+def relink_offline_clips(
+    media_folder_path: str,
+    bin_name: Optional[str] = None
+) -> dict:
+    """
+    Relink offline clips to media in a specified folder.
+
+    Args:
+        media_folder_path: Path to folder containing media files
+        bin_name: Specific bin to relink (None = entire media pool)
+
+    Returns:
+        Dictionary with relink statistics
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        return {"error": "No project currently open"}
+
+    media_pool = project.GetMediaPool()
+    root_folder = media_pool.GetRootFolder()
+
+    if not os.path.exists(media_folder_path):
+        return {"error": f"Folder not found: {media_folder_path}"}
+
+    # Collect clips
+    all_clips = []
+
+    if bin_name:
+        # Specific bin only
+        target_bin = None
+        subfolders = root_folder.GetSubFolderList()
+        if subfolders:
+            for subfolder in subfolders:
+                if subfolder.GetName() == bin_name:
+                    target_bin = subfolder
+                    break
+
+        if not target_bin:
+            return {"error": f"Bin '{bin_name}' not found"}
+
+        clips = target_bin.GetClipList()
+        if clips:
+            all_clips.extend(clips)
+    else:
+        # Entire media pool
+        all_clips = _get_all_clips_recursive(root_folder)
+
+    # Find offline clips
+    offline_clips = []
+    for clip in all_clips:
+        file_path = clip.GetClipProperty("File Path")
+        if not file_path or not os.path.exists(file_path):
+            offline_clips.append(clip)
+
+    if not offline_clips:
+        return {
+            "success": True,
+            "total_clips": len(all_clips),
+            "offline_clips": 0,
+            "message": "All clips are online"
+        }
+
+    # Attempt relink
+    result = media_pool.RelinkClips(offline_clips, media_folder_path)
+
+    # Check results
+    still_offline = 0
+    for clip in offline_clips:
+        file_path = clip.GetClipProperty("File Path")
+        if not file_path or not os.path.exists(file_path):
+            still_offline += 1
+
+    relinked_count = len(offline_clips) - still_offline
+
+    return {
+        "success": True,
+        "total_clips": len(all_clips),
+        "offline_clips": len(offline_clips),
+        "relinked": relinked_count,
+        "still_offline": still_offline
+    }
+
 
 # Start the server
 if __name__ == "__main__":
