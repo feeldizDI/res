@@ -83,6 +83,22 @@ from src.utils.project_properties import (
     get_project_metadata,
     get_project_info
 )
+from src.utils.suuktest_tools import (
+    scan_suuktest_structure,
+    import_suuktest_folder,
+    import_all_suuktest_xmls,
+    find_suuktest_media,
+    relink_suuktest_clips,
+    list_suuktest_projects
+)
+from src.utils.xml_import_tools import (
+    import_timeline_from_file,
+    import_all_xml_from_folder,
+    get_clips_in_bin,
+    get_media_pool_structure,
+    create_timeline_from_bin_clips,
+    relink_offline_clips
+)
 
 # Configure logging
 logging.basicConfig(
@@ -4624,6 +4640,161 @@ def get_project_info_endpoint() -> Dict[str, Any]:
         return {"error": "No project currently open"}
     
     return get_project_info(current_project)
+
+
+# ============================================
+# Suuktest Folder Management Tools
+# ============================================
+
+@mcp.tool()
+def suuktest_scan() -> Dict[str, Any]:
+    """Scan Suuktest folder structure (/Users/Shared/suuktest).
+
+    Returns folder structure with file counts and sizes for all projects.
+    """
+    return scan_suuktest_structure(show_details=False)
+
+
+@mcp.tool()
+def suuktest_import(subfolder_path: str, organize: bool = True, import_timelines: bool = True) -> Dict[str, Any]:
+    """Import Suuktest subfolder to media pool.
+
+    Args:
+        subfolder_path: Subfolder path (e.g., "mac3/CJU_SE")
+        organize: Organize files by extension into Video/Audio/Image bins
+        import_timelines: Import XML files as timelines
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return import_suuktest_folder(resolve, subfolder_path, organize, import_timelines)
+
+
+@mcp.tool()
+def suuktest_import_xmls(subfolder_path: str) -> Dict[str, Any]:
+    """Import all XML/AAF/EDL files from Suuktest subfolder as timelines.
+
+    Args:
+        subfolder_path: Subfolder path (e.g., "mac3/CJU_SE")
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return import_all_suuktest_xmls(resolve, subfolder_path)
+
+
+@mcp.tool()
+def suuktest_find_media(subfolder_path: str = None, file_type: str = None) -> Dict[str, Any]:
+    """Search for media files in Suuktest folder.
+
+    Args:
+        subfolder_path: Specific subfolder to search (None for all)
+        file_type: File type filter (video, audio, image, timeline)
+    """
+    return find_suuktest_media(subfolder_path, file_type)
+
+
+@mcp.tool()
+def suuktest_relink(subfolder_path: str = None) -> Dict[str, Any]:
+    """Relink offline clips using Suuktest folder.
+
+    Args:
+        subfolder_path: Specific subfolder to search (None for entire Suuktest folder)
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return relink_suuktest_clips(resolve, subfolder_path)
+
+
+@mcp.tool()
+def suuktest_list_projects() -> Dict[str, Any]:
+    """List all projects in Suuktest folder with file counts and sizes."""
+    return list_suuktest_projects()
+
+
+# ============================================
+# XML/AAF/EDL Import Tools
+# ============================================
+
+@mcp.tool()
+def import_timeline_xml(file_path: str, timeline_name: str = None) -> Dict[str, Any]:
+    """Import XML/AAF/EDL file as timeline.
+
+    Args:
+        file_path: Path to XML/AAF/EDL file
+        timeline_name: Optional timeline name (defaults to filename)
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return import_timeline_from_file(resolve, file_path, timeline_name)
+
+
+@mcp.tool()
+def import_xmls_from_folder(folder_path: str, create_bin: bool = True, recursive: bool = False) -> Dict[str, Any]:
+    """Import all XML/AAF/EDL files from folder as timelines.
+
+    Args:
+        folder_path: Folder containing XML files
+        create_bin: Create 'Xml' bin for organization
+        recursive: Search subfolders recursively
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return import_all_xml_from_folder(resolve, folder_path, create_bin, recursive)
+
+
+@mcp.tool()
+def get_bin_clips(bin_name: str = None) -> Dict[str, Any]:
+    """Get all clips in a specific bin or current bin.
+
+    Args:
+        bin_name: Bin name (None for current bin)
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return get_clips_in_bin(resolve, bin_name)
+
+
+@mcp.tool()
+def get_mediapool_structure() -> Dict[str, Any]:
+    """Get entire media pool structure as tree."""
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return get_media_pool_structure(resolve)
+
+
+@mcp.tool()
+def create_timeline_from_bin(bin_name: str, timeline_name: str = None) -> Dict[str, Any]:
+    """Create timeline from all clips in a bin.
+
+    Args:
+        bin_name: Source bin name
+        timeline_name: Timeline name (defaults to "{bin_name}_Timeline")
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return create_timeline_from_bin_clips(resolve, bin_name, timeline_name)
+
+
+@mcp.tool()
+def relink_clips(media_folder: str, bin_name: str = None) -> Dict[str, Any]:
+    """Relink offline clips using media folder.
+
+    Args:
+        media_folder: Folder containing media files
+        bin_name: Specific bin to relink (None for entire media pool)
+    """
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+
+    return relink_offline_clips(resolve, media_folder, bin_name)
+
 
 # Start the server
 if __name__ == "__main__":
